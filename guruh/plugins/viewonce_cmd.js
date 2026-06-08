@@ -2,12 +2,10 @@
 // ╔══════════════════════════════════════════════════════════════╗
 //  🐾  BLACK PANTHER MD  —  View Once & Custom Commands
 //  ✦  .vv              → reveal view-once media (group or DM)
-//  ✦  React to save    → linker reacts to view-once → saved to DM
+//  ✦  "thanks"         → any user says thanks → last view-once saved to inbox
+//  ✦  Any reaction     → anyone reacts to a view-once → saved to inbox
 //  ✦  Reply to save    → linker replies to view-once → saved to DM
 //  ✦  .cmd             → create / delete / list custom text commands
-//
-//  Both react AND reply trigger a silent anonymous save to the
-//  linker's own DM — the original sender is never notified.
 // ╚══════════════════════════════════════════════════════════════╝
 
 const { addCmd, addTrigger }       = require('../../guru/handlers/loader');
@@ -38,6 +36,10 @@ const stmts = {
 // ── In-memory store: msgId → raw message (for reaction/reply-based save) ─
 // Populated by the storeViewOnce trigger below, expires after 10 min
 const voStore = new Map();
+
+// ── Per-chat tracker: chatJid → msgId of the most recent view-once ──
+// Lets .vv work even without a reply quote (just send .vv in same chat)
+const lastVoPerChat = new Map();
 
 // ════════════════════════════════════════════════════════════════════
 //  HELPER — extract view-once payload
@@ -136,7 +138,6 @@ addTrigger({
     pattern: /[\s\S]*/,
     handler: async (ctx) => {
         try {
-            if (ctx.m.fromMe) return;
             if (ctx.m.isStatus) return;
 
             const voMessage = extractViewOnce(ctx.m.message);
@@ -145,16 +146,24 @@ addTrigger({
             const msgId = ctx.m.key?.id;
             if (!msgId) return;
 
-            voStore.set(msgId, {
+            const entry = {
                 voMessage,
                 key:       ctx.m.key,
                 from:      ctx.from,
                 sender:    ctx.sender,
                 groupName: ctx.groupName || null,
                 ts:        Date.now(),
-            });
+            };
+
+            voStore.set(msgId, entry);
+            // Track latest view-once per chat so .vv works without a reply
+            lastVoPerChat.set(ctx.from, msgId);
+
             // Auto-expire after 10 minutes
-            setTimeout(() => voStore.delete(msgId), 10 * 60 * 1000);
+            setTimeout(() => {
+                voStore.delete(msgId);
+                if (lastVoPerChat.get(ctx.from) === msgId) lastVoPerChat.delete(ctx.from);
+            }, 10 * 60 * 1000);
         } catch {}
     },
 });
@@ -243,24 +252,36 @@ addCmd({
         const quoted = ci?.quotedMessage || ctx.m.quoted || null;
         const voMsg  = extractViewOnce(quoted);
 
-        if (!voMsg && !quotedMsgId) {
+        // ── Strategy 0: last view-once in this chat (no reply needed) ──
+        let storedFallback = null;
+        if (!quotedMsgId) {
+            const lastId = lastVoPerChat.get(ctx.from);
+            if (lastId) storedFallback = voStore.get(lastId) || null;
+        }
+
+        if (!voMsg && !quotedMsgId && !storedFallback) {
             return ctx.sock.sendMessage(
                 ctx.from,
-                { text: '❌ Reply to a *view-once* image or video with *.vv*\n\n_Make sure to reply directly to the view-once message._', contextInfo: channelCtx() },
+                { text: '❌ No recent view-once found in this chat.\n\n_Send a view-once image/video and then use .vv within 10 minutes._', contextInfo: channelCtx() },
                 { quoted: ctx.m }
             );
         }
 
         await ctx.react('⏳');
 
-        // ── Strategy 1: use the in-memory store (most reliable) ──
+        // ── Strategy 1: use the in-memory store via reply stanzaId ──
         let result = null;
         if (quotedMsgId && voStore.has(quotedMsgId)) {
             const stored = voStore.get(quotedMsgId);
             result = await downloadViewOnceFromStored(stored).catch(() => null);
         }
 
-        // ── Strategy 2: fall back to re-downloading via contextInfo ──
+        // ── Strategy 2: use the last view-once in this chat (fallback) ──
+        if (!result?.buf && storedFallback) {
+            result = await downloadViewOnceFromStored(storedFallback).catch(() => null);
+        }
+
+        // ── Strategy 3: re-download via contextInfo (CDN fallback) ──
         if (!result?.buf && voMsg) {
             result = await downloadViewOnceFromCtx(ctx).catch(() => null);
         }
@@ -328,8 +349,8 @@ addCmd({
 // ════════════════════════════════════════════════════════════════════
 //  📥  REACTION-BASED VIEW-ONCE SAVE
 //
-//  When the LINKER reacts with any emoji to a view-once message,
-//  the media is silently saved to the linker's own DM (saved messages).
+//  When ANYONE reacts with any emoji to a stored view-once message,
+//  the media is silently saved to the bot's own DM inbox.
 //  The original sender is NEVER notified.
 //
 //  Exported so connection.js can call it for reactionMessage events.
@@ -340,31 +361,15 @@ async function handleViewOnceReaction(sock, reactMsg) {
         const reactionContent = reactMsg.message?.reactionMessage;
         if (!reactionContent) return;
 
-        // Determine if the reactor is the linker (bot account / owner).
-        // fromMe is the most reliable flag — true when the bot itself reacted.
-        // Also cross-check by JID for cases where fromMe may be absent.
-        const ownerJid   = config.OWNER_NUMBER + '@s.whatsapp.net';
-        const botSelfJid = getBotSelfJid(sock);
-
-        const reactor = cleanJid(
-            reactMsg.key.participant ||
-            reactMsg.key.remoteJid  ||
-            ''
-        );
-
-        const isLinker =
-            reactMsg.key.fromMe === true ||
-            reactor === cleanJid(botSelfJid) ||
-            reactor === cleanJid(ownerJid);
-
-        if (!isLinker) return;
-
         // Look up the reacted-to message in our view-once store
+        // Works for ANY reactor — not just the linker/owner
         const targetMsgId = reactionContent.key?.id;
         if (!targetMsgId) return;
 
         const stored = voStore.get(targetMsgId);
         if (!stored) return;
+
+        const botSelfJid = getBotSelfJid(sock);
 
         // Download the view-once media
         const result = await downloadViewOnceFromStored(stored);
@@ -372,20 +377,54 @@ async function handleViewOnceReaction(sock, reactMsg) {
 
         const { buf, voMessage } = result;
 
-        // Save to linker's DM — completely silent, no sender mention
+        // Save to bot's own DM inbox — completely silent
         const sent = await deliverToInbox(sock, botSelfJid, buf, voMessage, stored).catch(() => false);
         if (!sent) return;
 
-        // Acknowledge with ✅ reaction back on the original view-once message
+        // Acknowledge with ✅ reaction on the original view-once message
         await sock.sendMessage(reactMsg.key.remoteJid, {
             react: { text: '✅', key: reactionContent.key },
         }).catch(() => {});
 
-        // Remove from store — already saved
-        voStore.delete(targetMsgId);
-
+        // Keep in store — multiple people may react
     } catch {}
 }
+
+// ════════════════════════════════════════════════════════════════════
+//  🙏  "THANKS" KEYWORD TRIGGER
+//
+//  When ANY user sends a message containing "thanks" (case-insensitive)
+//  in a chat where a view-once was recently received, the bot silently
+//  saves that view-once to its own DM inbox.
+// ════════════════════════════════════════════════════════════════════
+addTrigger({
+    pattern: /\bthanks\b/i,
+    handler: async (ctx) => {
+        try {
+            if (ctx.m.isStatus) return;
+            if (ctx.m.fromMe)   return;  // ignore bot's own messages
+
+            // Is there a recent view-once in this chat?
+            const lastId = lastVoPerChat.get(ctx.from);
+            if (!lastId) return;
+
+            const stored = voStore.get(lastId);
+            if (!stored) return;
+
+            const botSelfJid = getBotSelfJid(ctx.sock);
+
+            // Download and save silently
+            const result = await downloadViewOnceFromStored(stored).catch(() => null);
+            if (!result?.buf) return;
+
+            const { buf, voMessage } = result;
+            await deliverToInbox(ctx.sock, botSelfJid, buf, voMessage, stored).catch(() => {});
+
+            // Silent ✅ reaction so the user knows it was received
+            await ctx.react('✅').catch(() => {});
+        } catch {}
+    },
+});
 
 // ════════════════════════════════════════════════════════════════════
 //  🛠️  .cmd — CREATE / DELETE / LIST CUSTOM COMMANDS
