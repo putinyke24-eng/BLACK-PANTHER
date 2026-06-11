@@ -1,6 +1,6 @@
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
-const { channelCtx } = require('../guru/utils/gmdFunctions2.js');
+const { channelCtx } = require('../../guru/utils/gmdFunctions2.js');
 
 export async function sendInteractive(client, m, text) {
     const chat = m.chat || m.from || m.key?.remoteJid;

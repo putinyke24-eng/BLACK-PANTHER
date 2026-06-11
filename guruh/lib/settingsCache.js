@@ -1,6 +1,6 @@
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
-const _cfg = require('../guru/config/settings.js');
+const _cfg = require('../../guru/config/settings.js');
 
 const _DEFAULTS = {
     device:        'default',

@@ -4,7 +4,7 @@ import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = path.dirname(__filename);
-const _jsonPath  = path.resolve(__dirname, '../whatsasena.json');
+const _jsonPath  = path.resolve(__dirname, '../../whatsasena.json');
 
 const _DEFAULTS = () => ({
     settings:             {},
@@ -154,7 +154,7 @@ export async function resetWarnings(jid, num) {
     if (_data.warn_data) { delete _data.warn_data[`${jid}:${num}`]; _save(); }
 }
 
-// ── Warn aliases (Toxic-MD naming) ───────────────────────────────────────────
+// ── Warn aliases (BLACK PANTHER MD naming) ───────────────────────────────────────────
 
 export async function getWarnCount(jid, user) {
     _init();

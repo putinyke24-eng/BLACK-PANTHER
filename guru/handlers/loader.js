@@ -25,14 +25,13 @@ function addTrigger({ pattern, handler }) {
 }
 
 // ═══════════════════════════════════════════════════════════
-//  CONTEXT BRIDGE — maps BLACK PANTHER MD ctx → Toxic-MD ctx
+//  CONTEXT BRIDGE — maps BLACK PANTHER MD ctx → plugin ctx
 // ═══════════════════════════════════════════════════════════
 
-function buildToxicCtx(ctx) {
+function buildPluginCtx(ctx) {
     const m = ctx.m || {};
-    const toxicM = new Proxy(m, {
+    const pluginM = new Proxy(m, {
         get(target, prop) {
-            // Toxic-MD aliases
             if (prop === 'chat')     return target.from || target.key?.remoteJid;
             if (prop === 'reactKey') return target.key;
             return target[prop];
@@ -40,20 +39,17 @@ function buildToxicCtx(ctx) {
     });
 
     return {
-        // Toxic-MD primary fields
         client:        ctx.sock,
-        m:             toxicM,
+        m:             pluginM,
         text:          ctx.text   || '',
         prefix:        config.BOT_PREFIX || '.',
         groupMetadata: ctx.groupMeta || null,
-        toxicspeed:    0.0094,
-        // Owner/admin flags Toxic-MD middleware uses
+        botspeed:      0.0094,
         Owner:         ctx.m?.isOwner || ctx.m?.fromMe || false,
         isOwner:       ctx.m?.isOwner || ctx.m?.fromMe || false,
         isBotAdmin:    ctx.m?.isBotAdmin || false,
         isAdmin:       ctx.m?.isAdmin || false,
         isGroup:       ctx.m?.isGroup || false,
-        // Pass-through BLACK PANTHER MD fields as well
         sock:          ctx.sock,
         from:          ctx.from,
         sender:        ctx.sender,
@@ -125,7 +121,7 @@ async function loadSubdirPlugins() {
                         aliases,
                         desc:     exported.description || exported.desc || '',
                         category: dir.toLowerCase(),
-                        handler:  (ctx) => exported.run(buildToxicCtx(ctx)),
+                        handler:  (ctx) => exported.run(buildPluginCtx(ctx)),
                     });
                     loaded++;
                     continue;
@@ -137,7 +133,7 @@ async function loadSubdirPlugins() {
                         name:     cmdName,
                         aliases:  [],
                         category: dir.toLowerCase(),
-                        handler:  (ctx) => exported(buildToxicCtx(ctx)),
+                        handler:  (ctx) => exported(buildPluginCtx(ctx)),
                     });
                     loaded++;
                     continue;
@@ -145,7 +141,6 @@ async function loadSubdirPlugins() {
 
                 skipped++;
             } catch (err) {
-                // Graceful degradation — one bad plugin never blocks others
                 if (process.env.DEBUG === 'true') {
                     console.error(`[LOADER] ${dir}/${file}: ${err.message}`);
                 }
